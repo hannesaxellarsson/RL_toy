@@ -14,18 +14,24 @@ import numpy as np
 import tensorflow as tf
 import gym
 import itertools
+import matplotlib.pyplot as plt
+import math
 import time
 
 env = gym.make('CartPole-v0')
-learning_rate = 5e-3
-val_learning_rate = 5e-3
+#learning_rate = 5e-3
+#val_learning_rate = 5e-3
+max_learning_rate = 1e-2
+min_learning_rate = 1e-6
+lr_decay = 100  
 num_iterations = 200
 
 batch_steps = 1000 #minimum steps in a batch
 max_steps = 200 #maximum number of steps for a run, after this many steps it ends no matter the outcome
-gamma = 1
+gamma = 0.9
 
 losses = []
+reward_log = []
 
 #%% 
 '''
@@ -55,7 +61,14 @@ def normalize(array, ref_mean = 0, ref_std = 1):
     mean = np.mean(array)
     std = np.std(array)
     return ((array - mean) / std) * ref_std + ref_mean
+
+def returnLearningRate(t, min_learning_rate, max_learning_rate, decay_speed):
+    return min_learning_rate + (max_learning_rate - min_learning_rate) * math.exp(-t/decay_speed)
 #%% Build the neural net for policy gradient
+'''
+learning rate
+'''    
+sy_lr = tf.placeholder(tf.float32)
 '''
 Placeholders for observations, actions and advantages
 '''
@@ -79,7 +92,7 @@ sy_act_logprobs = -tf.nn.sparse_softmax_cross_entropy_with_logits(
 optimize: we want to maximise the mean of the policy times the advantage
 '''
 loss = -tf.reduce_mean(sy_act_logprobs*sy_adv_n, name="policy_loss")
-opt_step = tf.train.AdamOptimizer(learning_rate, name = "opt_step").minimize(loss)
+opt_step = tf.train.AdamOptimizer(sy_lr, name = "opt_step").minimize(loss)
 
 '''
 value function approximator (critic)
@@ -92,7 +105,7 @@ baseline_target = tf.placeholder(dtype=tf.float32, shape = (None),
 
 baseline_loss = tf.losses.mean_squared_error(labels = baseline_target,
                                      predictions = baseline_prediction)
-bl_opt_step = tf.train.AdamOptimizer(val_learning_rate).minimize(baseline_loss)
+bl_opt_step = tf.train.AdamOptimizer(sy_lr).minimize(baseline_loss)
 
 #%%
 '''
@@ -101,6 +114,9 @@ Start a session
 sess = tf.Session()
 sess.__enter__()
 tf.global_variables_initializer().run()
+
+writer = tf.summary.FileWriter('./ACLogDir', sess.graph)
+writer.add_graph(tf.get_default_graph())
 
 #%%
 '''
@@ -119,9 +135,9 @@ for i_episode in range(num_iterations):
         #parameter for linear regression of states
         observation = env.reset()
         for t in itertools.count():
-            if animate:
-                env.render()
-                time.sleep(0.05)
+#            if animate:
+#                env.render()
+#                time.sleep(0.02)
             ob.append(observation)
             #get action from NN
             action = sess.run(sy_sampled_ac, feed_dict={
@@ -162,9 +178,10 @@ for i_episode in range(num_iterations):
     q_n = rtg.copy()
     
     #meanRew is just so we can write it out in the console
-    meanRew = np.concatenate([[discounted_reward(path["reward"], gamma
+    meanRew = np.concatenate([[discounted_reward(path["reward"], 1
                                                     )] for path in paths])
     meanRew = np.mean(meanRew)
+    reward_log.append(meanRew)
     print("Mean reward::: {}\n".format(meanRew))
     
     '''
@@ -185,20 +202,27 @@ for i_episode in range(num_iterations):
     '''
     fit value function approx (critic) to rewards
     '''
+    
+    learning_rate = returnLearningRate(i_episode, min_learning_rate,
+                                       max_learning_rate, lr_decay)
+    
     numValueIters= 1
     for i in range(numValueIters):
         sess.run(bl_opt_step, feed_dict = {sy_ob_no: ob_no,
-                                       baseline_target: normalize(rtg)})
+                                       baseline_target: normalize(rtg),
+                                       sy_lr: learning_rate})
 
     '''
     Improve policy
     '''
     trainLoss, _ = sess.run([loss, opt_step], feed_dict = {sy_ob_no: ob_no,
                                     sy_ac_na: ac_na,
-                                    sy_adv_n: adv_n})
+                                    sy_adv_n: adv_n,
+                                    sy_lr: learning_rate})
     
     #save losses so we can plot them later
     losses.append(trainLoss)
+    plt.plot(reward_log)
     
 sess.close()
 env.render(close=True)
